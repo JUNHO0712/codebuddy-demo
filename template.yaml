@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: CodeBuddy PR auto review system using AWS Lambda, Amazon Bedrock Agent, GitHub Webhook, and Slack.
+
+Parameters:
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub personal access token for reading PR diff and writing PR comments.
+
+  GitHubWebhookSecret:
+    Type: String
+    NoEcho: true
+    Description: GitHub webhook secret used to verify webhook signatures.
+
+  BedrockAgentId:
+    Type: String
+    Description: Amazon Bedrock Agent ID.
+
+  BedrockAgentAliasId:
+    Type: String
+    Description: Amazon Bedrock Agent Alias ID.
+
+  SlackWebhookUrl:
+    Type: String
+    NoEcho: true
+    Description: Slack Incoming Webhook URL.
+
+  LambdaFunctionName:
+    Type: String
+    Default: codebuddy-review
+    Description: Lambda function name.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 512
+
+Resources:
+  CodeBuddyReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Handler: lambda_function.lambda_handler
+      CodeUri: .
+      Environment:
+        Variables:
+          GITHUB_TOKEN: !Ref GitHubToken
+          GITHUB_WEBHOOK_SECRET: !Ref GitHubWebhookSecret
+          BEDROCK_AGENT_ID: !Ref BedrockAgentId
+          BEDROCK_AGENT_ALIAS_ID: !Ref BedrockAgentAliasId
+          SLACK_WEBHOOK_URL: !Ref SlackWebhookUrl
+          AWS_REGION: !Ref AWS::Region
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Sid: AllowInvokeBedrockAgent
+              Effect: Allow
+              Action:
+                - bedrock:InvokeAgent
+                - bedrock:GetAgent
+                - bedrock:GetAgentAlias
+              Resource: "*"
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: BUFFERED
+
+Outputs:
+  CodeBuddyFunctionUrl:
+    Description: GitHub Webhook Payload URL
+    Value: !GetAtt CodeBuddyReviewFunctionUrl.FunctionUrl
+
+  CodeBuddyFunctionName:
+    Description: Lambda function name
+    Value: !Ref CodeBuddyReviewFunction
