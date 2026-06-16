@@ -2,7 +2,9 @@ import os
 import json
 import hmac
 import hashlib
-import requests
+import base64
+import urllib.request
+import urllib.error
 import boto3
 
 
@@ -15,12 +17,29 @@ REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
 bedrock_agent = boto3.client("bedrock-agent-runtime", region_name=REGION)
 
 
+def get_header(headers, key):
+    for k, v in headers.items():
+        if k.lower() == key.lower():
+            return v
+    return None
+
+
+def get_body(event):
+    body = event.get("body", "")
+    if event.get("isBase64Encoded"):
+        body = base64.b64decode(body).decode("utf-8")
+    return body
+
+
 def verify_github_signature(event):
-    signature = event.get("headers", {}).get("x-hub-signature-256")
+    headers = event.get("headers", {}) or {}
+    signature = get_header(headers, "x-hub-signature-256")
+
     if not signature:
         return False
 
-    body = event.get("body", "")
+    body = get_body(event)
+
     expected = "sha256=" + hmac.new(
         GITHUB_WEBHOOK_SECRET.encode("utf-8"),
         body.encode("utf-8"),
@@ -30,25 +49,47 @@ def verify_github_signature(event):
     return hmac.compare_digest(signature, expected)
 
 
+def http_request(url, method="GET", headers=None, data=None):
+    headers = headers or {}
+
+    if data is not None:
+        data = json.dumps(data).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(
+        url=url,
+        data=data,
+        headers=headers,
+        method=method
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return response.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        raise Exception(f"HTTPError {e.code}: {error_body}")
+
+
 def get_pr_diff(owner, repo, pr_number):
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3.diff",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "codebuddy-review"
     }
 
-    response = requests.get(url, headers=headers, timeout=20)
-    response.raise_for_status()
-    return response.text
+    return http_request(url, method="GET", headers=headers)
 
 
 def invoke_bedrock_agent(diff_text):
     prompt = f"""
 다음 GitHub Pull Request 변경사항을 코드 리뷰해주세요.
 
-리뷰 항목:
+아래 형식으로 한국어로 답변하세요.
+
 1. 버그 및 논리 오류
 2. 보안 취약점
 3. 코드 스타일 문제
@@ -82,7 +123,8 @@ def post_pr_comment(owner, repo, pr_number, review_text):
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "codebuddy-review"
     }
 
     body = {
@@ -92,29 +134,30 @@ def post_pr_comment(owner, repo, pr_number, review_text):
 """
     }
 
-    response = requests.post(url, headers=headers, json=body, timeout=20)
-    response.raise_for_status()
+    return http_request(url, method="POST", headers=headers, data=body)
 
 
 def lambda_handler(event, context):
     try:
+        print("EVENT:", json.dumps(event))
+
         if not verify_github_signature(event):
             return {
                 "statusCode": 401,
                 "body": "Invalid GitHub signature"
             }
 
-        payload = json.loads(event["body"])
+        payload = json.loads(get_body(event))
 
         action = payload.get("action")
         if action not in ["opened", "synchronize", "reopened"]:
             return {
                 "statusCode": 200,
-                "body": "Ignored event"
+                "body": f"Ignored action: {action}"
             }
 
-        repo = payload["repository"]["name"]
         owner = payload["repository"]["owner"]["login"]
+        repo = payload["repository"]["name"]
         pr_number = payload["pull_request"]["number"]
 
         diff_text = get_pr_diff(owner, repo, pr_number)
